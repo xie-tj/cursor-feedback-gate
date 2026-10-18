@@ -74,6 +74,12 @@ try:
 except Exception as e:
     print(f"Warning: Could not create log file: {e}", file=sys.stderr)
 
+if os.name == 'nt' and hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except (OSError, ValueError):
+        pass
+
 stderr_handler = logging.StreamHandler(sys.stderr)
 stderr_handler.setLevel(logging.INFO)
 handlers.append(stderr_handler)
@@ -217,11 +223,7 @@ class FeedbackGateServer:
         def _is_pid_alive(pid):
             if pid is None or pid == self._server_pid:
                 return True
-            try:
-                os.kill(pid, 0)
-                return True
-            except OSError:
-                return False
+            return self._is_process_alive(pid)
         
         try:
             for pattern in [
@@ -239,7 +241,7 @@ class FeedbackGateServer:
                 for filepath in glob.glob(os.path.join(temp_dir, pattern)):
                     try:
                         if pattern.endswith(".pid"):
-                            data = json.loads(Path(filepath).read_text())
+                            data = json.loads(Path(filepath).read_text(encoding='utf-8'))
                             if _is_pid_alive(data.get("pid")):
                                 continue
                         else:
@@ -261,6 +263,43 @@ class FeedbackGateServer:
             logger.warning(f"⚠️ Startup cleanup error: {e}")
 
     @staticmethod
+    def _is_process_alive(pid: int | None) -> bool:
+        """Query process state without sending a console event on Windows."""
+        if pid is None or pid <= 0:
+            return False
+        if os.name == 'nt':
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                # ERROR_INVALID_PARAMETER means the PID no longer exists.
+                # Access denied or another query failure must not delete live state.
+                return ctypes.get_last_error() != 87
+            try:
+                exit_code = wintypes.DWORD()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return True
+                return exit_code.value == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        try:
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
     def _get_ancestor_pids(start_pid: int, max_depth: int = 10) -> list[int]:
         """Walk the process tree upward from start_pid, returning [parent, grandparent, ...].
         
@@ -271,6 +310,56 @@ class FeedbackGateServer:
         """
         ancestors: list[int] = []
         current = start_pid
+        if os.name == 'nt':
+            import ctypes
+            from ctypes import wintypes
+
+            class PROCESSENTRY32W(ctypes.Structure):
+                _fields_ = [
+                    ('dwSize', wintypes.DWORD),
+                    ('cntUsage', wintypes.DWORD),
+                    ('th32ProcessID', wintypes.DWORD),
+                    ('th32DefaultHeapID', ctypes.c_size_t),
+                    ('th32ModuleID', wintypes.DWORD),
+                    ('cntThreads', wintypes.DWORD),
+                    ('th32ParentProcessID', wintypes.DWORD),
+                    ('pcPriClassBase', wintypes.LONG),
+                    ('dwFlags', wintypes.DWORD),
+                    ('szExeFile', wintypes.WCHAR * 260),
+                ]
+
+            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+            kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+            for name in ('Process32FirstW', 'Process32NextW'):
+                function = getattr(kernel32, name)
+                function.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+                function.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+
+            snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+            if snapshot == wintypes.HANDLE(-1).value:
+                return ancestors
+            parents: dict[int, int] = {}
+            try:
+                entry = PROCESSENTRY32W()
+                entry.dwSize = ctypes.sizeof(entry)
+                available = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+                while available:
+                    parents[entry.th32ProcessID] = entry.th32ParentProcessID
+                    available = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+            finally:
+                kernel32.CloseHandle(snapshot)
+            seen = {current}
+            for _ in range(max_depth):
+                parent = parents.get(current, 0)
+                if parent <= 1 or parent in seen:
+                    break
+                ancestors.append(parent)
+                seen.add(parent)
+                current = parent
+            return ancestors
         try:
             import subprocess
             for _ in range(max_depth):
@@ -325,7 +414,7 @@ class FeedbackGateServer:
                 "timestamp": datetime.now().isoformat(),
                 "system": "feedback-gate"
             }
-            pid_file.write_text(json.dumps(pid_data))
+            pid_file.write_text(json.dumps(pid_data), encoding='utf-8')
             logger.info(f"📝 PID file written: {pid_file} (PPID: {os.getppid()}, ancestors: {ancestors}, workspace: {workspace_paths})")
         except Exception as e:
             logger.error(f"❌ Failed to write PID file: {e}")
@@ -512,7 +601,7 @@ class FeedbackGateServer:
         IMPORTANT: file is only deleted when valid content is extracted — if content
         is empty/unreadable, the file is left intact so the caller can retry later."""
         try:
-            file_content = response_file.read_text().strip()
+            file_content = response_file.read_text(encoding='utf-8').strip()
             if not file_content:
                 return None
 
@@ -641,7 +730,7 @@ class FeedbackGateServer:
         try:
             cfg_path = Path(cls._HEARTBEAT_CONFIG_PATH)
             if cfg_path.exists():
-                cfg = json.loads(cfg_path.read_text())
+                cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
                 mode = cfg.get("heartbeat_mode", mode).lower()
                 reply = cfg.get("heartbeat_reply", reply)
                 if "wait_seconds" in cfg:
@@ -942,7 +1031,7 @@ class FeedbackGateServer:
             routing_file = self._find_routing_file()
             if routing_file and routing_file.exists():
                 try:
-                    routing_data = json.loads(routing_file.read_text())
+                    routing_data = json.loads(routing_file.read_text(encoding='utf-8'))
                     required_model = routing_data.get("model", "")
                 except Exception:
                     pass
@@ -1152,14 +1241,7 @@ class FeedbackGateServer:
         if not cached_eh_pid:
             return False
         
-        eh_alive = False
-        try:
-            os.kill(cached_eh_pid, 0)
-            eh_alive = True
-        except (OSError, ProcessLookupError):
-            pass
-        
-        if eh_alive:
+        if self._is_process_alive(cached_eh_pid):
             return False
         
         logger.info(f"🔄 RECOVERY: EH {cached_eh_pid} is dead for trigger {trigger_id} — rewriting trigger file")
@@ -1208,7 +1290,7 @@ class FeedbackGateServer:
         try:
             for target in [per_trigger_file, pid_trigger_file, legacy_trigger_file]:
                 tmp = target.with_suffix('.json.tmp')
-                tmp.write_text(trigger_json)
+                tmp.write_text(trigger_json, encoding='utf-8')
                 tmp.replace(target)
             logger.info(f"🔄 RECOVERY: trigger file rewritten for {trigger_id} (ws={ws}, eh_pid=cleared)")
             _log_event("TRIGGER_RECOVERY", f"trigger={trigger_id} dead_eh={cached_eh_pid} ws={ws}")
@@ -1230,7 +1312,7 @@ class FeedbackGateServer:
         while time.time() - start_time < timeout:
             try:
                 if ack_file.exists():
-                    data = json.loads(ack_file.read_text())
+                    data = json.loads(ack_file.read_text(encoding='utf-8'))
                     ack_status = data.get("acknowledged", False)
                     
                     try:
@@ -1329,7 +1411,7 @@ class FeedbackGateServer:
                 routing_file = self._find_routing_file()
                 if routing_file and routing_file.exists():
                     try:
-                        routing_data = json.loads(routing_file.read_text())
+                        routing_data = json.loads(routing_file.read_text(encoding='utf-8'))
                         fg_chat_id = routing_data.get("chat_id", "")
                         fg_platform = routing_data.get("platform", "") or fg_platform
                         fg_session = routing_data.get("session", "") or fg_session
@@ -1355,7 +1437,9 @@ class FeedbackGateServer:
             _target_eh_pid = self._session_to_eh_pid.get(_sid) if _sid else None
             # If workspace changed from what was cached, the cached eh_pid may
             # point to the wrong window — clear it to avoid mis-routing.
-            if _target_eh_pid and _call_workspace and _cached_workspace and _call_workspace != _cached_workspace:
+            if (_target_eh_pid and _call_workspace and _cached_workspace
+                    and os.path.normcase(os.path.normpath(_call_workspace))
+                    != os.path.normcase(os.path.normpath(_cached_workspace))):
                 logger.info(f"🔄 Workspace changed for session {_sid[:8]}...: {_cached_workspace} → {_call_workspace}, clearing cached eh_pid {_target_eh_pid}")
                 _target_eh_pid = None
             
@@ -1386,7 +1470,7 @@ class FeedbackGateServer:
                 targets.insert(0, per_trigger_file)
             for target in targets:
                 tmp = target.with_suffix('.json.tmp')
-                tmp.write_text(trigger_json)
+                tmp.write_text(trigger_json, encoding='utf-8')
                 tmp.replace(target)
             
             logger.info(f"🔥 Trigger created: {per_trigger_file or pid_trigger_file} ({file_size} bytes)")
@@ -1536,4 +1620,4 @@ if __name__ == "__main__":
     except Exception as e:
         _log_event("SERVER_STOP", f"reason=crash error={e}")
         logger.error(f"❌ Server crashed: {e}")
-        sys.exit(1) 
+        sys.exit(1)

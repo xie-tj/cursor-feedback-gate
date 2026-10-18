@@ -65,6 +65,8 @@ The script auto-completes: Python venv setup, dependency installation, MCP confi
 
 Reload Cursor window after installation to start using.
 
+On Windows, run the installer in **Git Bash** with native Python 3.10+ (on PATH or available through `py -3`) and Node.js/npm installed. The installer uses `venv/Scripts/python.exe` and writes native Windows paths to the MCP configuration. Add the `cursor` CLI to PATH for automatic extension installation, or use **Ctrl+Shift+P → Extensions: Install from VSIX**. Re-run `bash install.sh` to update a Windows installation.
+
 ## Configuration
 
 ### Display Location

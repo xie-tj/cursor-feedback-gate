@@ -65,6 +65,8 @@ cd cursor-feedback-gate
 
 安装后 Reload Cursor 窗口即可使用。
 
+Windows 用户请在 **Git Bash** 中运行安装脚本，并安装原生 Python 3.10+（加入 PATH 或可通过 `py -3` 调用）及 Node.js/npm。安装脚本会使用 `venv/Scripts/python.exe`，并将 Windows 原生路径写入 MCP 配置。将 `cursor` 命令加入 PATH 可自动安装扩展，也可以用 **Ctrl+Shift+P → Extensions: Install from VSIX** 手动安装。Windows 更新可重新运行 `bash install.sh`。
+
 ## 配置
 
 ### 显示位置
