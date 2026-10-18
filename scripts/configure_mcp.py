@@ -21,6 +21,8 @@ def configure_mcp(config_file: Path, install_dir: Path) -> None:
             "PYTHONUTF8": "1",
             "PYTHONIOENCODING": "utf-8",
             "FEEDBACK_GATE_MODE": "cursor_integration",
+            "FEEDBACK_GATE_IDE_WAIT_SECONDS": "90",
+            "FEEDBACK_GATE_PROGRESS_KEEPALIVE": "1",
         },
     }
     config_file.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")

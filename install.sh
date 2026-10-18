@@ -83,6 +83,7 @@ log "安装到 $INSTALL_DIR ..."
 mkdir -p "$INSTALL_DIR"
 
 cp "$SCRIPT_DIR/feedback_gate_mcp.py" "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/feedback_gate_lifecycle.py" "$INSTALL_DIR/"
 
 # --- Python 虚拟环境 ---
 log "配置 Python 虚拟环境..."
@@ -166,6 +167,13 @@ if [[ "$OS" == "windows" ]] && command -v cygpath &> /dev/null; then
 fi
 "$VENV_PY" "$CONFIG_SCRIPT" "$MCP_CONFIG_ARG" "$INSTALL_DIR_ARG"
 ok "MCP 配置已更新: $CURSOR_MCP_FILE"
+
+LIFECYCLE_SCRIPT="$INSTALL_DIR/feedback_gate_lifecycle.py"
+if [[ "$OS" == "windows" ]] && command -v cygpath &> /dev/null; then
+    LIFECYCLE_SCRIPT=$(cygpath -w "$LIFECYCLE_SCRIPT")
+fi
+"$VENV_PY" "$LIFECYCLE_SCRIPT" --install-hooks
+ok "Feedback Gate 等待续接钩子已安装（保留其他 hooks）"
 
 # --- 构建并安装 Cursor 扩展 ---
 log "构建扩展..."
